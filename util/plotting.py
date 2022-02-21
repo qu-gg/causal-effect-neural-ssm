@@ -25,9 +25,9 @@ def plot_recon_lightning(X, Xrec, img_size, genstart, out_loc):
         selected_rcns = Xrec[idx, :genstart]
         selected_gens = Xrec[idx, genstart:]
 
-        selected_inps = np.uint8(selected_inps * 255)
-        selected_rcns = np.uint8(selected_rcns * 255)
-        selected_gens = np.uint8(selected_gens * 255)
+        selected_inps = np.uint8(np.clip(selected_inps, 1e-3, 0.999) * 255)
+        selected_rcns = np.uint8(np.clip(selected_rcns, 1e-3, 0.999) * 255)
+        selected_gens = np.uint8(np.clip(selected_gens, 1e-3, 0.999) * 255)
 
         img = np.zeros((img_size * 2, genstart * img_size)).astype(np.uint8)
         for i in range(genstart):
