@@ -284,9 +284,14 @@ class DGSSM(pytorch_lightning.LightningModule):
             a_physics = self.intervention_encoder(l)
             a = self.intervention_gru(a_physics, a_)
 
+            # Set last a to this jumped a
+            last_a = a
+
             # Propagate forward with corrected a and normal dynamics z
             z = odeint(self.combined_ode_func, torch.cat((z, a), dim=1), torch.tensor([0, 1]), method='rk4', options={'step_size': 0.25})  # [T,q]
             z = z.permute([1, 0, 2])[:, -1]
+
+            # TODO - Add GRU update as GRU[Enc(Y), Z-]
 
             # Add corrected z to trajectory list
             zt_final = torch.cat((zt_final, z), dim=1)

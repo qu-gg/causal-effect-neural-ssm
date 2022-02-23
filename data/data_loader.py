@@ -24,7 +24,7 @@ class DynamicsDataset(Dataset):
     Load in the BSP and TMP data from the raw .mat files
     Loads static starting positions of the sequence
     """
-    def __init__(self, data_size=9999, vt=False, split='train', newload=False, random=False):
+    def __init__(self, data_size=9999, vt=False, version="normal", split='train', newload=False, random=False):
         """
         :param data_size: how many samples to load in, default all
         :param split: which split (train/test) to load in for this dataset object
@@ -32,13 +32,27 @@ class DynamicsDataset(Dataset):
         """
         self.random = random
 
+        # Get prefix and the ending safe index for this VT dataset
+        if version == "block":
+            prefix = "Block"
+            self.end_idx = 31
+        elif version == "pacing":
+            prefix = "Pacing"
+            self.end_idx = -1
+        elif version == "normal":
+            prefix = "Normal"
+            self.end_idx = 15
+        else:
+            raise NotImplementedError("Incorrect version {}".format(version))
+
+        # On a new load, stack all the individual mat files, normalize them, and split to train/val/test
         if newload:
             # Process BSP
             bsp_idxs = []
             bsps = None
-            for f in tqdm(os.listdir("VT_BSP/")):
+            for f in tqdm(os.listdir("{}/{}_BSP/".format(prefix, prefix))):
                 bsp_idxs.append(f.split("_")[1])
-                bsp = loadmat("VT_BSP/{}".format(f))["bsp"]
+                bsp = loadmat("{}/{}_BSP/{}".format(prefix, prefix, f))["bsp"]
 
                 if bsps is None:
                     bsps = np.expand_dims(bsp, axis=0)
@@ -48,9 +62,9 @@ class DynamicsDataset(Dataset):
             # Process TMP
             tmp_idxs = []
             tmps = None
-            for f in tqdm(os.listdir("VT_TMP/")):
+            for f in tqdm(os.listdir("{}/{}_TMP/".format(prefix, prefix))):
                 tmp_idxs.append(f.split("_")[1])
-                tmp = loadmat("VT_TMP/{}".format(f))["tmp"]
+                tmp = loadmat("{}/{}_TMP/{}".format(prefix, prefix, f))["tmp"]
 
                 if tmps is None:
                     tmps = np.expand_dims(tmp, axis=0)
@@ -68,22 +82,19 @@ class DynamicsDataset(Dataset):
                                                             shuffle=True)
 
             # Save on new load
-            np.save("vt_bsps_train.npy", train_x, allow_pickle=True)
-            np.save("vt_tmps_train.npy", train_y, allow_pickle=True)
+            np.save("{}/{}_bsps_train.npy".format(prefix, version), train_x, allow_pickle=True)
+            np.save("{}/{}_tmps_train.npy".format(prefix, version), train_y, allow_pickle=True)
 
-            np.save("vt_bsps_val.npy", val_x, allow_pickle=True)
-            np.save("vt_tmps_val.npy", val_y, allow_pickle=True)
+            np.save("{}/{}_bsps_val.npy".format(prefix, version), val_x, allow_pickle=True)
+            np.save("{}/{}_tmps_val.npy".format(prefix, version), val_y, allow_pickle=True)
 
-            np.save("vt_bsps_test.npy", test_x, allow_pickle=True)
-            np.save("vt_tmps_test.npy", test_y, allow_pickle=True)
+            np.save("{}/{}_bsps_test.npy".format(prefix, version), test_x, allow_pickle=True)
+            np.save("{}/{}_tmps_test.npy".format(prefix, version), test_y, allow_pickle=True)
 
         # Otherwise just load in the given split type
-        elif vt is False:
-            bsps = np.load("data/bsps_{}.npy".format(split), allow_pickle=True)
-            tmps = np.load("data/tmps_{}.npy".format(split), allow_pickle=True)
         else:
-            bsps = np.load("data/vt_bsps_{}.npy".format(split), allow_pickle=True)
-            tmps = np.load("data/vt_tmps_{}.npy".format(split), allow_pickle=True)
+            bsps = np.load("data/{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
+            tmps = np.load("data/{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
 
         # Transform into tensors and change to float type
         tmps = (tmps > 0.4).astype('float32')
@@ -103,8 +114,7 @@ class DynamicsDataset(Dataset):
             idx = idx % len(self.bsps)
 
             # First get random starting indices for the sequences
-            # starting_idxs = np.random.randint(5, 112, 1)[0]
-            starting_idxs = np.random.randint(0, 19, 1)[0]
+            starting_idxs = np.random.randint(5, self.end_idx, 1)[0]
 
             # Then get a slice of 10 timesteps from the given start
             return torch.Tensor([idx]), \
@@ -117,16 +127,27 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, vt=True, split='train', newload=False)
+    dataset = DynamicsDataset(5000, vt=True, version="normal", split='train', newload=False)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 
-    for i in range(0, 120, 2):
-        plt.imshow(dataset.__getitem__(0)[1][i])
-        plt.title("BSP {}".format(0))
-        plt.show()
+    test = dataset.__getitem__(0)[1].cpu().numpy()
+    test2 = dataset.__getitem__(5)[1].cpu().numpy()
 
-    # for i in range(10):
-    #     plt.imshow(dataset.__getitem__(i)[2][0])
-    #     plt.title("TMP {}".format(i))
+    # for i in range(0, 28, 2):
+    #     plt.imshow(dataset.__getitem__(0)[1][i])
+    #     plt.title("BSP {}".format(0))
     #     plt.show()
+
+    for i in range(0, 44, 2):
+        plt.imshow(dataset.__getitem__(0)[2][i], cmap='gray')
+        plt.title("BSP 0, step {}".format(i))
+        plt.show()
+        plt.pause(0.2)
+
+    for i in range(0, 44, 2):
+        plt.imshow(dataset.__getitem__(5)[2][i], cmap='gray')
+        plt.title("BSP 5, step {}".format(i))
+        plt.show()
+        plt.pause(0.2)
+
