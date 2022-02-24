@@ -212,7 +212,7 @@ class DGSSM(pytorch_lightning.LightningModule):
             # Make image dir in lightning experiment folder if it doesn't exist
             if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
                 os.mkdir('lightning_logs/version_{}/images/'.format(top))
-                shutil.copy("stochastic_ode_ssm.py", "lightning_logs/version_{}/".format(top))
+                shutil.copy("ode_ssm_jump.py", "lightning_logs/version_{}/".format(top))
 
             # Using the last batch of this
             plot_recon_lightning(outputs[-1]["tmps"][:5], outputs[-1]["preds"][:5],
@@ -221,10 +221,15 @@ class DGSSM(pytorch_lightning.LightningModule):
 
             # Copy experiment to relevant folder
             if arg.exptype is not None:
-                if os.path.exists("experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop)):
-                    shutil.rmtree("experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop))
+                if os.path.exists("experiments/{}/{}/version_{}/".format(self.args.model, self.args.exptype, exptop)):
+                    shutil.rmtree("experiments/{}/{}/version_{}/".format(self.args.model, self.args.exptype, exptop))
                 shutil.copytree("lightning_logs/version_{}/".format(top),
                             "experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop))
+
+        if self.current_epoch % 250 == 0:
+            torch.save(self.state_dict(), "experiments/{}/{}/version_{}/checkpoints/ckpt{}.ckpt".format(
+                self.args.model, self.args.exptype, exptop, self.current_epoch)
+            )
 
     def validation_step(self, batch, batch_idx):
         """ One validation step for a given batch """
@@ -297,6 +302,8 @@ def parse_args():
     parser.add_argument('--model', type=str, default='jump', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
+    parser.add_argument('--version', type=str, default='normal', help='which dataset version to use')
+
 
     # Learning hyperparameters
     parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs to run over')
@@ -329,11 +336,11 @@ if __name__ == '__main__':
     top, exptop = get_exp_versions(arg.model, arg.exptype)
 
     # Input generation
-    traindata = DynamicsDataset(vt=True, split='train', random=arg.random)
+    traindata = DynamicsDataset(version=arg.version, split='train', random=arg.random)
     trainset = DataLoader(traindata, batch_size=arg.batch_size, shuffle=True, num_workers=2)
     last_train_idx = (traindata.bsps.shape[0] // arg.batch_size) - 1
 
-    valdata = DynamicsDataset(vt=True, split='val', random=arg.random)
+    valdata = DynamicsDataset(version=arg.version, split='val', random=arg.random)
     valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=2)
 
     # Init trainer

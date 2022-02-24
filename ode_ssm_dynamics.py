@@ -17,6 +17,7 @@ import torch.nn as nn
 import pytorch_lightning
 import torch.nn.functional as F
 
+from scipy.io import loadmat
 from torchdiffeq import odeint
 from torch.utils.data import DataLoader
 from util.layers import Flatten, UnFlatten
@@ -98,46 +99,89 @@ class InterventionODEFunction(nn.Module):
 
 
 class CombinedODEFunction(nn.Module):
-    def __init__(self, args, a_func):
+    def __init__(self, args):
+        """
+        Represents a global NODE function whose weights are deterministic
+        :param args: script arguments to use for initialization
+        """
+        super(InterventionODEFunction, self).__init__()
+
+        # Parameters
+        self.args = args
+
+        # Array that holds dimensions over hidden layers
+        self.combined_dim = args.latent_dim + 2 * args.intervention_dim
+        self.layers_dim = [self.combined_dim] + args.num_layers * [args.num_hidden + 2 * args.intervention_hidden] + [self.combined_dim]
+
+        # Build activation layers and layer normalization
+        self.acts = []
+        self.layer_norms = []
+        for i, (n_in, n_out) in enumerate(zip(self.layers_dim[:-1], self.layers_dim[1:])):
+            self.acts.append(get_act('leaky_relu') if i < args.num_layers else get_act('linear'))
+            self.layer_norms.append(nn.LayerNorm(n_out, device=0) if True and i < args.num_layers else nn.Identity())
+
+        # Build up initial distributions of weights and biases
+        self.weights, self.biases = nn.ParameterList([]), nn.ParameterList([])
+        for i, (n_in, n_out) in enumerate(zip(self.layers_dim[:-1], self.layers_dim[1:])):
+            # Weights
+            self.weights.append(torch.nn.Parameter(torch.randn([n_in, n_out]), requires_grad=True))
+            self.biases.append(torch.nn.Parameter(torch.randn([n_out]), requires_grad=True))
+
+    def forward(self, t, x):
+        """ Wrapper function for the odeint calculation """
+        for norm, a, w, b in zip(self.layer_norms, self.acts, self.weights, self.biases):
+            x = a(norm(F.linear(x, w.T, b)))
+        return x
+
+
+class CombinedODEFunction(nn.Module):
+    def __init__(self, args, z_func):
         """
         Represents a global NODE function whose weights are deterministic
         :param args: script arguments to use for initialization
         """
         super(CombinedODEFunction, self).__init__()
+
+        # Sizes of vector fields
+        self.z_size = args.latent_dim
+        self.a_size = args.intervention_dim
+        self.c_size = args.latent_dim + args.intervention_dim
+
         # Z Dynamics function
-        self.z_func = DeterministicODEFunction(args)
-        self.load_in_weights()
+        self.z_func = z_func
 
         # A dynamics function
-        self.a_func = a_func
+        self.a_func = InterventionODEFunction(args)
 
     def load_in_weights(self):
         """ Function to handle loading in the pre-trained normal dynamics """
+        self.z_func.requires_grad_(False)
         pass
 
-    def forward(self, t, x):
-        """ Wrapper function for the odeint calculation """
-        x = self.z_func(x) + self.a_func(x)
-        return x
+    def forward(self, t, input_concat):
+        # Separate latent fields
+        z, a, s = input_concat[:, :self.z_size], input_concat[:, self.z_size:self.c_size], input_concat[:, self.c_size:]
+
+        # Perform the combined dynamics forward pass
+        d_z = self.z_func(z)
+        d_a = self.a_func(a)
+        d_s = d_z + d_a     # TODO - add a third vector field here taking in [z, a, s]?
+
+        # Concatenate to pass forward to
+        return torch.concat([d_z, d_a, d_s], dim=1)
 
 
 class DGSSM(pytorch_lightning.LightningModule):
-    def __init__(self, args, last_train_idx):
+    def __init__(self, args):
         super().__init__()
-        self.save_hyperparameters(args)
 
         # Args
         self.args = args
-        self.last_train_idx = last_train_idx
 
-        # Losses
-        self.bce = nn.BCELoss(reduction='none')
+        # ODE class holding weights and forward propagation
+        self.ode_func = DeterministicODEFunction(args)
 
-        # Dynamics functions
-        self.ode_a_dynamics = InterventionODEFunction(args)
-        self.combined_func = CombinedODEFunction(args, self.ode_a_dynamics)
-
-        """ z0 encoder and update mechanisms for the z dynamics """
+        """ Sub-network modules, z0 encoder and decoder """
         self.z_encoder = nn.Sequential(
             nn.Conv2d(self.args.z_amort, 64, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(64),
@@ -148,9 +192,61 @@ class DGSSM(pytorch_lightning.LightningModule):
             nn.ELU(),
 
             Flatten(),
-            nn.Linear(128 * 6 * 5, self.args.latent_dim)
+            nn.Linear(128 * 3 * 3, self.args.latent_dim)
         )
 
+        # Decoding network to get the reconstructed trajectory
+        self.decoder = nn.Sequential(
+            # First perform two linear scaling layers
+            nn.Linear(self.args.latent_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ELU(),
+
+            nn.Linear(512, 2048),
+            nn.BatchNorm1d(2048),
+            nn.ELU(),
+
+            # Then transform to image and tranpose convolve
+            UnFlatten(8),
+            nn.ConvTranspose2d(32, 16, kernel_size=(5, 5), stride=3),
+            nn.BatchNorm2d(16),
+            nn.ELU(),
+
+            nn.ConvTranspose2d(16, 8, kernel_size=(3, 3), stride=2, padding=(2, 2)),
+            nn.BatchNorm2d(8),
+            nn.ELU(),
+
+            nn.ConvTranspose2d(8, 1, kernel_size=(4, 4), stride=2),
+            nn.Sigmoid()
+        )
+
+
+class ODEVAEIM(pytorch_lightning.LightningModule):
+    def __init__(self, args, H, last_train_idx):
+        super().__init__()
+        self.save_hyperparameters(args)
+
+        # Args
+        self.args = args
+        self.H = H
+        self.last_train_idx = last_train_idx
+
+        # Sizes of vector fields
+        self.z_size = args.latent_dim
+        self.a_size = args.intervention_dim
+        self.c_size = args.latent_dim + args.intervention_dim
+
+        # Losses
+        self.bce = nn.BCELoss(reduction='none')
+
+        # Dynamics functions
+        self.normal_net = DGSSM(args)
+        self.normal_net.load("STATE_DICT")
+        self.normal_net.requires_grad_(False)
+
+        self.combined_func = CombinedODEFunction(args, self.normal_net.ode_func)
+
+        """ Update mechanisms for the z dynamics """
         self.z_jump_encoder = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(32),
@@ -194,31 +290,7 @@ class DGSSM(pytorch_lightning.LightningModule):
 
         self.a_gru = nn.GRUCell(input_size=self.args.intervention_dim, hidden_size=self.args.intervention_dim)
 
-        """ Two decoders, pre-trained one and the final optimized one """
-        self.decoder = nn.Sequential(
-            # First perform two linear scaling layers
-            nn.Linear(self.args.latent_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ELU(),
-
-            nn.Linear(512, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ELU(),
-
-            # Then transform to image and tranpose convolve
-            UnFlatten(8),
-            nn.ConvTranspose2d(32, 16, kernel_size=(5, 5), stride=3),
-            nn.BatchNorm2d(16),
-            nn.ELU(),
-
-            nn.ConvTranspose2d(16, 8, kernel_size=(3, 3), stride=2, padding=(2, 2)),
-            nn.BatchNorm2d(8),
-            nn.ELU(),
-
-            nn.ConvTranspose2d(8, 1, kernel_size=(4, 4), stride=2),
-            nn.Sigmoid()
-        )
-
+        """ Final optimized decoder """
         # Decoding network to get the reconstructed trajectory
         self.final_decoder = nn.Sequential(
             # First perform two linear scaling layers
@@ -250,69 +322,69 @@ class DGSSM(pytorch_lightning.LightningModule):
         the equation L = MSE(Hx_hat, Yk)
         :param x_hat: reconstructed TMP
         """
-        return self.mse(self.H * x_hat, y)
+        return self.mse(self.H @ x_hat.view([x_hat.shape[0], -1]), y)
 
-    def forward(self, x):
+    def forward(self, y):
         """
         Forward function of the network that handles locally embedding the given sample into the C codes,
         generating the z posterior that defines mixture weightings, and finding the winning components for
         each sample
-        :param x: data observation, which is a timeseries [BS, Timesteps, N Channels, Dim1, Dim2]
+        :param y: BSP data observation, which is a timeseries [BS, Timesteps, Dim1, Dim2]
         :return: reconstructions of the trajectory and generation
         """
-        batch_size, generation_len = x.shape[0], x.shape[1]
+        batch_size, generation_len = y.shape[0], y.shape[1]
 
         # Get q(z0 | X) and sample z0
-        z0 = self.z_encoder(x[:, :self.args.z_amort])
-        a0 = self.a_encoder(x[:, :self.args.z_amort])
+        z0 = self.normal_net.z_encoder(y[:, :self.args.z_amort])
+        a0 = self.a_encoder(y[:, :self.args.z_amort])
 
         # Evaluate model forward over T to get L latent reconstructions
         timesteps = torch.linspace(0, generation_len - 1, generation_len - 1).to(self.device)
 
-        # Evaluate the normal dynamics over the full time-period
-        zt_normal = odeint(self.dynanmics_ode_func, z0, t, method='rk4', options={'step_size': 0.25})  # [T,q]
-        zt_normal = zt_normal.permute([1, 0, 2])
-
-        # Decode
-        x_normal = self.decoder(zt_normal.contiguous().view([batch_size * generation_len, z0.shape[1]]))  # L*N*T,nc,d,d
-        x_normal = x_normal.view([batch_size, generation_len, 100, 100])  # L,N,T,nc,d,d
-
-        # Get physics-informed loss between normal dynamics reconstruction and BSP at all timesteps
-        ls = self.intervention_loss(x_normal, y)
-
         # Evaluate forward over timestep
         last_a = a0
         last_z = z0
+        last_s = (a0 + z0)
 
-        zts = [z0.unsqueeze(0)]     # TODO - intervention application to z0? GRU update cell?
+        st = [last_s.unsqueeze(0)]     # TODO - intervention application to z0? GRU update cell?
         for t in timesteps[1:]:
             """ Step 1: Propagate both functions forwards (combined function f(z) + f(a)) """
-            # Propagate a and z forward the current dynamics prediction
-            a_pred = odeint(self.ode_a_dynamics, last_a, t=torch.tensor([0, 1], dtype=torch.float),
-                            method='rk4', options={'step_size': 0.25})[-1, :]
+            combined_pred = odeint(self.combined_func, torch.concat([last_z, last_a, last_s], dim=1),
+                                   t=torch.tensor([0, 1], dtype=torch.float),
+                                   method='rk4', options={'step_size': 0.25})[-1, :]    # T, B, D
 
-            z_pred = odeint(self.combined_func, last_z, t=torch.tensor([0, 1], dtype=torch.float),
-                            method='rk4', options={'step_size': 0.25})[-1, :]
+            # Split vector field into appropriate individual ones, where s_pred represents the intervened prediction
+            z_normal_pred = combined_pred[:, :self.z_size]
+            a_pred = combined_pred[:, self.z_size:self.c_size]
+            s_pred = combined_pred[:, self.c_size:]
 
             """ Step 2: Update A via PI-Loss """
-            # Decode
+            # Decode z normal pred
+            normal_x_rec = self.normal_net.decoder(z_normal_pred.contiguous())
 
+            # Get a encoding from PI-loss
+            a_diff = self.intervention_loss(normal_x_rec, y[:, t])
+            a_enc = self.a_jump_encoder(a_diff)
+
+            # Correct a with PI-encoding
+            a_corrected = self.a_gru(a_enc, a_pred)
+
+            """ Step 3: Update S with Y encoding """
             # Get z encoding from data and update the z state
-            z_enc = self.z_jump_encoder(x[:, t.cpu().numpy()].unsqueeze(1))
-            z_corrected = self.jump_cell(z_enc, z_pred)
+            z_enc = self.z_jump_encoder(y[:, t.cpu().numpy()].unsqueeze(1))
+            s = self.jump_cell(z_enc, s_pred)
 
-            # Get a encoding from PI-loss and update the a state
-            a_diff = self.intervention_loss()
-            a_enc = self.a_jump_encoder()
-            z_corrected = self.jump_cell(z_enc, z_pred)
+            """ Step 4: Update variables"""
+            last_z = z_normal_pred
+            last_a = a_corrected
+            last_s = s
 
-            # Add to trajectory, update last z
-            last_z = z_corrected
-            zts.append(z_corrected.unsqueeze(0))
+            # Append s pred to trajectory
+            st.append(s.unsqueeze(0))
 
         # Stack trajectory and decode
-        zt = torch.vstack(zt).permute([1, 0, 2])
-        Xrec = self.decoder(zt.contiguous().view([batch_size * generation_len, z0.shape[1]]))  # L*N*T,nc,d,d
+        st = torch.vstack(st).permute([1, 0, 2])
+        Xrec = self.decoder(st.contiguous().view([batch_size * generation_len, z0.shape[1]]))  # L*N*T,nc,d,d
         Xrec = Xrec.view([batch_size, generation_len, 100, 100])  # L,N,T,nc,d,d
         return Xrec
 
@@ -479,11 +551,13 @@ if __name__ == '__main__':
     valdata = DynamicsDataset(vt=True, split='val', random=arg.random)
     valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=2)
 
+    H_matrix = loadmat("data/H.mat")["H"]
+
     # Init trainer
     trainer = pytorch_lightning.Trainer.from_argparse_args(arg, max_epochs=arg.num_epochs, auto_select_gpus=True)
 
     # Initialize model
-    model = DGSSM(arg, last_train_idx)
+    model = DGSSM(arg, H_matrix, last_train_idx)
 
     # Choose whether to restart from a given version checkpoint or have new training
     if arg.checkpt == 'None':

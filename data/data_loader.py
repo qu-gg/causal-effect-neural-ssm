@@ -38,10 +38,12 @@ class DynamicsDataset(Dataset):
             self.end_idx = 31
         elif version == "pacing":
             prefix = "Pacing"
-            self.end_idx = -1
+            self.end_idx = 31
         elif version == "normal":
             prefix = "Normal"
-            self.end_idx = 15
+            self.end_idx = 22
+        elif version == 'original':
+            prefix = "Original"
         else:
             raise NotImplementedError("Incorrect version {}".format(version))
 
@@ -96,8 +98,11 @@ class DynamicsDataset(Dataset):
             bsps = np.load("data/{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
             tmps = np.load("data/{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
 
+            # bsps = np.load("{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
+            # tmps = np.load("{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
+
         # Transform into tensors and change to float type
-        tmps = (tmps > 0.4).astype('float32')
+        tmps = (tmps > 0.4).astype('float64')
 
         self.bsps = torch.from_numpy(bsps).to(device=torch.Tensor().device)[:data_size]
         self.tmps = torch.from_numpy(tmps).to(device=torch.Tensor().device)[:data_size]
@@ -106,7 +111,7 @@ class DynamicsDataset(Dataset):
         self.tmps = self.tmps.float()
 
     def __len__(self):
-        return len(self.bsps) * 5
+        return len(self.bsps) * 10
 
     def __getitem__(self, idx):
         # Get a random starting position in the sequence for this sample
@@ -118,8 +123,8 @@ class DynamicsDataset(Dataset):
 
             # Then get a slice of 10 timesteps from the given start
             return torch.Tensor([idx]), \
-                   self.bsps[idx, starting_idxs:starting_idxs + 13], \
-                   self.tmps[idx, starting_idxs:starting_idxs + 13]
+                   self.bsps[idx, starting_idxs:starting_idxs + 6], \
+                   self.tmps[idx, starting_idxs:starting_idxs + 6]
 
         # Get the full sequence from the starting position
         else:
@@ -127,26 +132,20 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, vt=True, version="normal", split='train', newload=False)
+    dataset = DynamicsDataset(5000, vt=True, version="block", split='train', newload=True)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 
-    test = dataset.__getitem__(0)[1].cpu().numpy()
-    test2 = dataset.__getitem__(5)[1].cpu().numpy()
-
-    # for i in range(0, 28, 2):
-    #     plt.imshow(dataset.__getitem__(0)[1][i])
-    #     plt.title("BSP {}".format(0))
-    #     plt.show()
-
-    for i in range(0, 44, 2):
-        plt.imshow(dataset.__getitem__(0)[2][i], cmap='gray')
+    bsp = dataset.tmps[np.random.randint(0, 599, 1)[0]]
+    for i in range(0, 28, 2):
+        plt.imshow(bsp[i], cmap='gray')
         plt.title("BSP 0, step {}".format(i))
         plt.show()
         plt.pause(0.2)
 
-    for i in range(0, 44, 2):
-        plt.imshow(dataset.__getitem__(5)[2][i], cmap='gray')
+    bsp = dataset.tmps[np.random.randint(0, 599, 1)[0]]
+    for i in range(0, 28, 2):
+        plt.imshow(bsp[i], cmap='gray')
         plt.title("BSP 5, step {}".format(i))
         plt.show()
         plt.pause(0.2)
