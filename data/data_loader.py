@@ -24,24 +24,25 @@ class DynamicsDataset(Dataset):
     Load in the BSP and TMP data from the raw .mat files
     Loads static starting positions of the sequence
     """
-    def __init__(self, data_size=9999, vt=False, version="normal", split='train', newload=False, random=False):
+    def __init__(self, data_size=9999, version="normal", length=13, split='train', newload=False, random=False):
         """
         :param data_size: how many samples to load in, default all
         :param split: which split (train/test) to load in for this dataset object
         :param newload: whether to generate the stacked files
         """
         self.random = random
+        self.length = length
 
         # Get prefix and the ending safe index for this VT dataset
         if version == "block":
             prefix = "Block"
-            self.end_idx = 31
+            self.end_idx = 44 - length
         elif version == "pacing":
             prefix = "Pacing"
-            self.end_idx = 31
+            self.end_idx = 28 - length
         elif version == "normal":
             prefix = "Normal"
-            self.end_idx = 22
+            self.end_idx = 28 - length
         elif version == 'original':
             prefix = "Original"
         else:
@@ -97,7 +98,6 @@ class DynamicsDataset(Dataset):
         else:
             bsps = np.load("data/{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
             tmps = np.load("data/{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
-
             # bsps = np.load("{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
             # tmps = np.load("{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
 
@@ -111,7 +111,7 @@ class DynamicsDataset(Dataset):
         self.tmps = self.tmps.float()
 
     def __len__(self):
-        return len(self.bsps) * 10
+        return len(self.bsps) * 5
 
     def __getitem__(self, idx):
         # Get a random starting position in the sequence for this sample
@@ -119,12 +119,12 @@ class DynamicsDataset(Dataset):
             idx = idx % len(self.bsps)
 
             # First get random starting indices for the sequences
-            starting_idxs = np.random.randint(5, self.end_idx, 1)[0]
+            starting_idxs = np.random.randint(0, self.end_idx, 1)[0]
 
             # Then get a slice of 10 timesteps from the given start
             return torch.Tensor([idx]), \
-                   self.bsps[idx, starting_idxs:starting_idxs + 6], \
-                   self.tmps[idx, starting_idxs:starting_idxs + 6]
+                   self.bsps[idx, starting_idxs:starting_idxs + self.length], \
+                   self.tmps[idx, starting_idxs:starting_idxs + self.length]
 
         # Get the full sequence from the starting position
         else:
@@ -132,7 +132,7 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, vt=True, version="block", split='train', newload=True)
+    dataset = DynamicsDataset(5000, version="normal", split='train', newload=True)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 

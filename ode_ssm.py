@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from torchdiffeq import odeint
 from torch.utils.data import DataLoader
-from util.layers import Flatten, UnFlatten
+from util.layers import Flatten, UnFlatten, Gaussian
 from data.data_loader import DynamicsDataset
 from util.plotting import plot_recon_lightning
 from util.utils import get_act, get_exp_versions
@@ -88,6 +88,7 @@ class DGSSM(pytorch_lightning.LightningModule):
             nn.ELU(),
 
             Flatten(),
+            # Gaussian(128 * 3 * 3, self.args.latent_dim)
             nn.Linear(128 * 3 * 3, self.args.latent_dim)
         )
 
@@ -214,8 +215,8 @@ class DGSSM(pytorch_lightning.LightningModule):
             loss = (self.args.r_beta * bce_r) + bce_g
 
         # Logging
-        self.log("zval_bce_r_loss", self.args.r_beta * bce_r, prog_bar=True)
-        self.log("zval_bce_g_loss", bce_g, prog_bar=True)
+        self.log("val_bce_r_loss", self.args.r_beta * bce_r, prog_bar=True)
+        self.log("val_bce_g_loss", bce_g, prog_bar=True)
         return {"val_loss": loss, "val_preds": preds.detach(), "val_tmps": tmp.detach()}
 
     def validation_epoch_end(self, outputs):
@@ -227,7 +228,7 @@ class DGSSM(pytorch_lightning.LightningModule):
 
             # Using the last batch of this
             plot_recon_lightning(outputs[-1]["val_tmps"][:5], outputs[-1]["val_preds"][:5], self.args.dim,
-                                 self.args.train_len, 'lightning_logs/version_{}/images/recon{}val.png'.format(top, self.current_epoch))
+                                 self.args.z_amort, 'lightning_logs/version_{}/images/recon{}val.png'.format(top, self.current_epoch))
 
             # Save all val_reconstructions to npy file
             recons = None
@@ -243,28 +244,23 @@ class DGSSM(pytorch_lightning.LightningModule):
     def add_model_specific_args(parent_parser):
         """ Model specific parameter group used for PytorchLightning integration """
         parser = parent_parser.add_argument_group("MoGSSM")
-        parser.add_argument('--latent_dim', type=int, default=16,
-                            help='latent dimension size, as well as vector field dimension')
+        parser.add_argument('--latent_dim', type=int, default=16, help='latent dimension vector field dimension')
 
         parser.add_argument('--num_layers', type=int, default=2, help='number of layers in the ODE func')
         parser.add_argument('--num_hidden', type=int, default=100, help='number of nodes per hidden layer in ODE func')
         parser.add_argument('--num_filt', type=int, default=16, help='number of filters in the CNNs')
 
-        parser.add_argument('--train_len', type=int, default=3,
-                            help='how many X samples to use in model initialization')
-        # parser.add_argument('--generation_len', type=int, default=13, help='total length to generate')
-
+        parser.add_argument('--train_len', type=int, default=3, help='how many X samples to use in model initialization')
         parser.add_argument('--z_amort', type=int, default=3, help='how many X samples to use in z0 inference')
         return parent_parser
-
 
 def parse_args():
     """ General arg parsing for non-model parameters """
     parser = argparse.ArgumentParser()
 
     # Experiment ID
-    parser.add_argument('--exptype', type=str, default='normal_dynamics_3step', help='name of the exp folder')
-    parser.add_argument('--checkpt', type=str, default='None', help='checkpoint to resume training from')
+    parser.add_argument('--exptype', type=str, default='normal_dynamics', help='name of the exp folder')
+    parser.add_argument('--checkpt', type=str, default='48', help='checkpoint to resume training from')
     parser.add_argument('--model', type=str, default='normal', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
@@ -290,8 +286,8 @@ if __name__ == '__main__':
     parser = pytorch_lightning.Trainer.add_argparse_args(parser)
     parser = DGSSM.add_model_specific_args(parser)
     arg = parser.parse_args()
-    arg.gpus = [0]      # Choose the GPU ID to run on here
-    arg.generation_len = 13 if arg.random else 32
+    arg.gpus = [0]  # Choose the GPU ID to run on here
+    arg.generation_len = arg.train_len + arg.z_amort
 
     # Set a consistent seed over the full set for consistent analysis
     pytorch_lightning.seed_everything(125125125)
@@ -301,12 +297,12 @@ if __name__ == '__main__':
     top, exptop = get_exp_versions(arg.model, arg.exptype)
 
     # Input generation
-    traindata = DynamicsDataset(version=arg.version, split='train', random=arg.random)
-    trainset = DataLoader(traindata, batch_size=arg.batch_size, shuffle=True, num_workers=2)
+    traindata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='train', random=arg.random)
+    trainset = DataLoader(traindata, batch_size=arg.batch_size, shuffle=True, num_workers=4)
     last_train_idx = (traindata.bsps.shape[0] // arg.batch_size) - 1
 
-    valdata = DynamicsDataset(version=arg.version, split='val', random=arg.random)
-    valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=2)
+    valdata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='val', random=arg.random)
+    valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=4)
 
     # Init trainer
     trainer = pytorch_lightning.Trainer.from_argparse_args(arg, max_epochs=arg.num_epochs, auto_select_gpus=True)
