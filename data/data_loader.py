@@ -24,7 +24,7 @@ class DynamicsDataset(Dataset):
     Load in the BSP and TMP data from the raw .mat files
     Loads static starting positions of the sequence
     """
-    def __init__(self, data_size=9999, version="normal", length=13, split='train', newload=False, random=False):
+    def __init__(self, data_size=9999, version="normal", length=13, split='train', newload=False, random=False, bernoulli=False):
         """
         :param data_size: how many samples to load in, default all
         :param split: which split (train/test) to load in for this dataset object
@@ -106,7 +106,8 @@ class DynamicsDataset(Dataset):
 
 
         # Transform into tensors and change to float type
-        # tmps = (tmps > 0.4).astype('float64')
+        if bernoulli:
+            tmps = (tmps > 0.4).astype('float64')
 
         self.bsps = torch.from_numpy(bsps).to(device=torch.Tensor().device)[:data_size]
         self.tmps = torch.from_numpy(tmps).to(device=torch.Tensor().device)[:data_size]

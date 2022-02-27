@@ -51,7 +51,6 @@ class DeterministicODEFunction(nn.Module):
         # Build up initial distributions of weights and biases
         self.weights, self.biases = nn.ParameterList([]), nn.ParameterList([])
         for i, (n_in, n_out) in enumerate(zip(self.layers_dim[:-1], self.layers_dim[1:])):
-            # Weights
             self.weights.append(torch.nn.Parameter(torch.randn([n_in, n_out]), requires_grad=True))
             self.biases.append(torch.nn.Parameter(torch.randn([n_out]), requires_grad=True))
 
@@ -181,8 +180,15 @@ class DGSSM(pytorch_lightning.LightningModule):
             nn.LeakyReLU(0.1),
 
             nn.ConvTranspose2d(16, 1, kernel_size=(4, 4), stride=2),
-            nn.Sigmoid()
         )
+
+        # Which set of activations to use on the network output
+        if self.args.bernoulli:
+            self.act = nn.Identity()
+            self.out_act = nn.Sigmoid()
+        else:
+            self.act = nn.Sigmoid()
+            self.out_act = nn.Identity()
 
 
 class ODEVAEIM(pytorch_lightning.LightningModule):
@@ -200,7 +206,10 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.a_size = args.intervention_dim
 
         # Losses
-        self.mse = nn.MSELoss(reduction='none')
+        if self.args.bernoulli:
+            self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        else:
+            self.bce = nn.MSELoss(reduction='none')  # , pos_weight=torch.tensor(2))
 
         # Dynamics functions
         self.normal_net = DGSSM(args)
@@ -337,7 +346,8 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         tmp = tmp[:, 1:self.args.generation_len + 1]
 
         # Get prediction and sigmoid-activated predictions
-        preds = self(bsp)
+        preds = self.act(self(bsp))
+        sig_preds = self.out_act(preds)
 
         # Get loss and update weights
         loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
@@ -346,7 +356,7 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.log("bce_g_loss", loss, prog_bar=True)
 
         if batch_idx >= self.last_train_idx:
-            return {"loss": loss, "preds": preds.detach(), "tmps": tmp.detach()}
+            return {"loss": loss, "preds": sig_preds.detach(), "tmps": tmp.detach()}
         else:
             return {"loss": loss}
 
@@ -380,7 +390,8 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
             tmp = tmp[:, 1:self.args.generation_len + 1]
 
             # Get predicted trajectory from the model
-            preds = self(bsp)
+            preds = self.act(self(bsp))
+            sig_preds = self.out_act(preds)
 
             # Get loss and update weights
             loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
@@ -388,7 +399,7 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
             # Logging
             self.log("val_bce_g_loss", loss, prog_bar=True)
 
-        return {"val_loss": loss, "val_preds": preds.detach(), "val_tmps": tmp.detach()}
+        return {"val_loss": loss, "val_preds": sig_preds.detach(), "val_tmps": tmp.detach()}
 
     def validation_epoch_end(self, outputs):
         """ Every 10 epochs, get reconstructions on batch of data """
@@ -440,6 +451,7 @@ def parse_args():
     parser.add_argument('--prev_ckpt', type=str, default='1', help='original ode-vae ckpt to load from')
     parser.add_argument('--model', type=str, default='ode_vae_im_gru', help='which model to choose')
 
+    parser.add_argument('--bernoulli', type=bool, default=True, help='whether to apply bernoulli filtering to the output data')
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
     parser.add_argument('--version', type=str, default='pacing', help='which dataset version to use')
 
@@ -473,11 +485,11 @@ if __name__ == '__main__':
     top, exptop = get_exp_versions(arg.model, arg.exptype)
 
     # Input generation
-    traindata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='train', random=arg.random)
+    traindata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='train', random=arg.random, bernoulli=arg.bernoulli)
     trainset = DataLoader(traindata, batch_size=arg.batch_size, shuffle=True, num_workers=4)
     last_train_idx = (traindata.bsps.shape[0] // arg.batch_size) - 1
 
-    valdata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='val', random=arg.random)
+    valdata = DynamicsDataset(version=arg.version, length=arg.generation_len, split='val', random=arg.random, bernoulli=arg.bernoulli)
     valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=4)
 
     # Load in the H matrix
