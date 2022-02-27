@@ -148,11 +148,11 @@ class DGSSM(pytorch_lightning.LightningModule):
         self.z_encoder = nn.Sequential(
             nn.Conv2d(self.args.z_amort, 64, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             Flatten(),
             nn.Linear(128 * 3 * 3, self.args.latent_dim)
@@ -163,32 +163,24 @@ class DGSSM(pytorch_lightning.LightningModule):
             # First perform two linear scaling layers
             nn.Linear(self.args.latent_dim, 256),
             nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Linear(256, 1024),
             nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             # Then transform to image and tranpose convolve
             UnFlatten(8),
             nn.ConvTranspose2d(16, 32, kernel_size=(5, 5), stride=3),
             nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.ConvTranspose2d(32, 16, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(16),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.ConvTranspose2d(16, 1, kernel_size=(4, 4), stride=2),
         )
-
-        # Which set of activations to use on the network output
-        if self.args.bernoulli:
-            self.act = nn.Identity()
-            self.out_act = nn.Sigmoid()
-        else:
-            self.act = nn.Sigmoid()
-            self.out_act = nn.Identity()
 
 
 class ODEVAEIM(pytorch_lightning.LightningModule):
@@ -206,10 +198,12 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.a_size = args.intervention_dim
 
         # Losses
-        if self.args.bernoulli:
-            self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        if self.args.bernoulli == 1:
+            self.lossf = nn.BCEWithLogitsLoss(reduction='none')
         else:
-            self.bce = nn.MSELoss(reduction='none')  # , pos_weight=torch.tensor(2))
+            self.lossf = nn.MSELoss(reduction='none')  # , pos_weight=torch.tensor(2))
+
+        self.mse = nn.MSELoss(reduction='none')
 
         # Dynamics functions
         self.normal_net = DGSSM(args)
@@ -217,7 +211,7 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         if new_train:
             self.normal_net.load_state_dict(
                 torch.load(
-                    "lightning_logs/version_{}/checkpoints/{}".format(arg.prev_ckpt, "epoch=349-step=13299.ckpt")
+                    "experiments/ode_vae/normal_bce/version_1/checkpoints/epoch=349-step=26249.ckpt", map_location=torch.device(0)
                 )["state_dict"]
             )
 
@@ -229,19 +223,27 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
 
         """ Update mechanisms for the a dynamics """
         self.a_jump_encoder = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
+            nn.Conv2d(self.args.a_amort, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Conv2d(32, 64, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             Flatten(),
             nn.Linear(64 * 3 * 3, self.args.latent_dim)
         )
 
         self.a_gru = nn.GRUCell(input_size=self.args.intervention_dim, hidden_size=self.args.intervention_dim)
+
+        # Which set of activations to use on the network output
+        if self.args.bernoulli == 1:
+            self.act = nn.Identity()
+            self.out_act = nn.Sigmoid()
+        else:
+            self.act = nn.Sigmoid()
+            self.out_act = nn.Identity()
 
     def set_H(self, H):
         self.H = torch.from_numpy(H).requires_grad_(False).to(self.args.gpus[0]).float()
@@ -270,14 +272,18 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         a0 = torch.zeros([batch_size, self.args.intervention_dim]).to(self.device)
 
         # Evaluate model forward over T to get L latent reconstructions
-        timesteps = torch.linspace(1, generation_len - 1, generation_len).to(self.device)
+        timesteps = torch.linspace(1, generation_len - 1, generation_len - 1).to(self.device)
 
         # Evaluate forward over timestep
         a_pred = a0
         last_z = z0
         at = []
         zt = []
-        for t in timesteps:
+        intvs = [torch.zeros([batch_size, 1, bsp_dim, bsp_dim], requires_grad=False, device=self.device)
+                 for _ in range(self.args.a_amort - 1)]
+        for tidx in timesteps:
+            t = int(tidx.cpu().numpy())
+
             """ Step 1: Get jumped intervention a """
             # Get normal dynamics prediction
             z_pred = odeint(self.normal_net.ode_func, last_z, t=torch.tensor([0, 1], dtype=torch.float),
@@ -287,8 +293,9 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
             x_pred = self.normal_net.decoder(z_pred.contiguous().view([batch_size, z0.shape[1]]))  # N, D
 
             # Get intervention loss with H and a encoding
-            intv_loss = self.intervention_loss(x_pred, y[:, int(t.cpu().numpy())]).view([batch_size, 1, bsp_dim, bsp_dim])
-            a_enc = self.a_jump_encoder(intv_loss)
+            intv_loss = self.intervention_loss(x_pred, y[:, t]).view([batch_size, 1, bsp_dim, bsp_dim])
+            intv_stack = 0.01 * torch.concat((intvs[-(self.args.a_amort - 1):] + [intv_loss]), dim=1)
+            a_enc = self.a_jump_encoder(intv_stack)
 
             # Predict a forwards and jump it with a_enc
             a = self.a_gru(a_enc, a_pred)
@@ -306,11 +313,12 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
             # Append to variables
             zt.append(last_z.unsqueeze(0))
             at.append(a_pred.unsqueeze(0))
+            intvs.append(intv_loss)
 
         # Stack trajectory and decode
         zt = torch.vstack(zt).permute([1, 0, 2])
-        Xrec = self.normal_net.decoder(zt.contiguous().view([batch_size * generation_len, z0.shape[1]]))  # L*N*T,nc,d,d
-        Xrec = Xrec.view([batch_size, generation_len, 100, 100])  # L,N,T,nc,d,d
+        Xrec = self.normal_net.decoder(zt.contiguous().view([batch_size * (generation_len - 1), z0.shape[1]]))  # L*N*T,nc,d,d
+        Xrec = Xrec.view([batch_size, generation_len - 1, 100, 100])  # L,N,T,nc,d,d
         return Xrec
 
     def configure_optimizers(self):
@@ -322,15 +330,15 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
     def training_step(self, batch, batch_idx):
         """ One training step for a given batch """
         _, bsp, tmp = batch
-        bsp = bsp[:, :self.args.generation_len - 1]
-        tmp = tmp[:, 1:self.args.generation_len + 1]
+        bsp = bsp[:, :self.args.generation_len]
+        tmp = tmp[:, 1:self.args.generation_len]
 
         # Get prediction and sigmoid-activated predictions
         preds = self.act(self(bsp))
         sig_preds = self.out_act(preds)
 
         # Get loss and update weights
-        loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
+        loss = self.lossf(preds, tmp).sum([2, 3]).view([-1]).mean()
 
         # Logging
         self.log("bce_g_loss", loss, prog_bar=True)
@@ -366,15 +374,15 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         """ One validation step for a given batch """
         with torch.no_grad():
             _, bsp, tmp = batch
-            bsp = bsp[:, :self.args.generation_len - 1]
-            tmp = tmp[:, 1:self.args.generation_len + 1]
+            bsp = bsp[:, :self.args.generation_len]
+            tmp = tmp[:, 1:self.args.generation_len]
 
             # Get predicted trajectory from the model
             preds = self.act(self(bsp))
             sig_preds = self.out_act(preds)
 
             # Get loss and update weights
-            loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
+            loss = self.lossf(preds, tmp).sum([2, 3]).view([-1]).mean()
 
             # Logging
             self.log("val_bce_g_loss", loss, prog_bar=True)
@@ -413,10 +421,12 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
 
         parser.add_argument('--num_layers', type=int, default=2, help='number of layers in the ODE func')
         parser.add_argument('--num_hidden', type=int, default=200, help='number of nodes per hidden layer in ODE func')
+        parser.add_argument('--intervention_hidden', type=int, default=200, help='number of nodes per hidden layer in ODE func')
         parser.add_argument('--num_filt', type=int, default=16, help='number of filters in the CNNs')
 
         parser.add_argument('--train_len', type=int, default=24, help='how many samples to use in reconstruction')
         parser.add_argument('--z_amort', type=int, default=3, help='how many X samples to use in z0 inference')
+        parser.add_argument('--a_amort', type=int, default=3, help='how many X+1 samples to use in a_enc inference')
         return parent_parser
 
 
@@ -425,19 +435,19 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Experiment ID
-    parser.add_argument('--exptype', type=str, default='pacing_dynamics_mse', help='name of the exp folder')
+    parser.add_argument('--exptype', type=str, default='pacing_mse_3a', help='name of the exp folder')
     parser.add_argument('--checkpt', type=str, default='None', help='checkpoint to resume training from')
     parser.add_argument('--prev_ckpt', type=str, default='None', help='original ode-vae ckpt to load from')
     parser.add_argument('--model', type=str, default='ode_vae_im', help='which model to choose')
 
-    parser.add_argument('--bernoulli', type=bool, default=True, help='whether to apply bernoulli filtering to the output data')
+    parser.add_argument('--bernoulli', type=int, default=0, help='whether to apply bernoulli filtering to the output data')
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
     parser.add_argument('--version', type=str, default='pacing', help='which dataset version to use')
 
     # Learning hyperparameters
     parser.add_argument('--num_epochs', type=int, default=501, help='number of epochs to run over')
     parser.add_argument('--batch_size', type=int, default=16, help='size of batch')
-    parser.add_argument('--learning_rate', type=float, default=0.0025, help='learning rate')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='learning rate')
 
     # Dimensions of different components
     parser.add_argument('--dim', type=int, default=100, help='dimension of the image data')

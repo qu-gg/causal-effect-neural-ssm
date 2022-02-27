@@ -24,7 +24,7 @@ class DynamicsDataset(Dataset):
     Load in the BSP and TMP data from the raw .mat files
     Loads static starting positions of the sequence
     """
-    def __init__(self, data_size=9999, version="normal", length=13, split='train', newload=False, random=False, bernoulli=False):
+    def __init__(self, data_size=9999, version="normal", length=13, split='train', newload=False, random=False, bernoulli=0):
         """
         :param data_size: how many samples to load in, default all
         :param split: which split (train/test) to load in for this dataset object
@@ -106,7 +106,7 @@ class DynamicsDataset(Dataset):
 
 
         # Transform into tensors and change to float type
-        if bernoulli:
+        if bernoulli == 0:
             tmps = (tmps > 0.4).astype('float64')
 
         self.bsps = torch.from_numpy(bsps).to(device=torch.Tensor().device)[:data_size]
@@ -137,18 +137,18 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, version="block", split='train', newload=False)
+    dataset = DynamicsDataset(5000, version="pacing", split='train', newload=False, bernoulli=False)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 
-    bsp = dataset.tmps[np.random.randint(0, 599, 1)[0]]
+    bsp = dataset.tmps[np.random.randint(0, 200, 1)[0]]
     for i in range(0, 28, 2):
         plt.imshow(bsp[i], cmap='gray')
         plt.title("BSP 0, step {}".format(i))
         plt.show()
         plt.pause(0.2)
 
-    bsp = dataset.tmps[np.random.randint(0, 599, 1)[0]]
+    bsp = dataset.tmps[np.random.randint(0, 200, 1)[0]]
     for i in range(0, 28, 2):
         plt.imshow(bsp[i], cmap='gray')
         plt.title("BSP 5, step {}".format(i))

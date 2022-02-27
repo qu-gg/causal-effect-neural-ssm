@@ -148,11 +148,11 @@ class DGSSM(pytorch_lightning.LightningModule):
         self.z_encoder = nn.Sequential(
             nn.Conv2d(self.args.z_amort, 64, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             Flatten(),
             nn.Linear(128 * 3 * 3, self.args.latent_dim)
@@ -163,32 +163,24 @@ class DGSSM(pytorch_lightning.LightningModule):
             # First perform two linear scaling layers
             nn.Linear(self.args.latent_dim, 256),
             nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Linear(256, 1024),
             nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             # Then transform to image and tranpose convolve
             UnFlatten(8),
             nn.ConvTranspose2d(16, 32, kernel_size=(5, 5), stride=3),
             nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.ConvTranspose2d(32, 16, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(16),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.ConvTranspose2d(16, 1, kernel_size=(4, 4), stride=2),
         )
-
-        # Which set of activations to use on the network output
-        if self.args.bernoulli:
-            self.act = nn.Identity()
-            self.out_act = nn.Sigmoid()
-        else:
-            self.act = nn.Sigmoid()
-            self.out_act = nn.Identity()
 
 
 class ODEVAEIM(pytorch_lightning.LightningModule):
@@ -206,10 +198,12 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.a_size = args.intervention_dim
 
         # Losses
-        if self.args.bernoulli:
-            self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        if self.args.bernoulli == 1:
+            self.lossf = nn.BCEWithLogitsLoss(reduction='none')
         else:
-            self.bce = nn.MSELoss(reduction='none')  # , pos_weight=torch.tensor(2))
+            self.lossf = nn.MSELoss(reduction='none')  # , pos_weight=torch.tensor(2))
+
+        self.mse = nn.MSELoss(reduction='none')
 
         # Dynamics functions
         self.normal_net = DGSSM(args)
@@ -231,11 +225,11 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.z_step_encoder = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Conv2d(32, 64, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             Flatten(),
             nn.Linear(64 * 3 * 3, self.args.latent_dim)
@@ -247,17 +241,25 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         self.a_jump_encoder = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             nn.Conv2d(32, 64, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
+            nn.ELU(),
 
             Flatten(),
             nn.Linear(64 * 3 * 3, self.args.latent_dim)
         )
 
         self.a_gru = nn.GRUCell(input_size=self.args.intervention_dim, hidden_size=self.args.intervention_dim)
+
+        # Which set of activations to use on the network output
+        if self.args.bernoulli == 1:
+            self.act = nn.Identity()
+            self.out_act = nn.Sigmoid()
+        else:
+            self.act = nn.Sigmoid()
+            self.out_act = nn.Identity()
 
     def set_H(self, H):
         self.H = torch.from_numpy(H).requires_grad_(False).to(self.args.gpus[0]).float()
@@ -350,7 +352,7 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
         sig_preds = self.out_act(preds)
 
         # Get loss and update weights
-        loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
+        loss = self.lossf(preds, tmp).sum([2, 3]).view([-1]).mean()
 
         # Logging
         self.log("bce_g_loss", loss, prog_bar=True)
@@ -394,7 +396,7 @@ class ODEVAEIM(pytorch_lightning.LightningModule):
             sig_preds = self.out_act(preds)
 
             # Get loss and update weights
-            loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
+            loss = self.lossf(preds, tmp).sum([2, 3]).view([-1]).mean()
 
             # Logging
             self.log("val_bce_g_loss", loss, prog_bar=True)
@@ -451,7 +453,7 @@ def parse_args():
     parser.add_argument('--prev_ckpt', type=str, default='1', help='original ode-vae ckpt to load from')
     parser.add_argument('--model', type=str, default='ode_vae_im_gru', help='which model to choose')
 
-    parser.add_argument('--bernoulli', type=bool, default=True, help='whether to apply bernoulli filtering to the output data')
+    parser.add_argument('--bernoulli', type=int, default=0, help='whether to apply bernoulli filtering to the output data')
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
     parser.add_argument('--version', type=str, default='pacing', help='which dataset version to use')
 
