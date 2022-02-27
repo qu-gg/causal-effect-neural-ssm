@@ -43,6 +43,9 @@ class DynamicsDataset(Dataset):
         elif version == "normal":
             prefix = "Normal"
             self.end_idx = 28 - length
+        elif version == "base":
+            prefix = "Base"
+            self.end_idx = 28 - length
         elif version == 'original':
             prefix = "Original"
         else:
@@ -98,11 +101,9 @@ class DynamicsDataset(Dataset):
         else:
             bsps = np.load("data/{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
             tmps = np.load("data/{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
-            # bsps = np.load("{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
-            # tmps = np.load("{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
 
         # Transform into tensors and change to float type
-        tmps = (tmps > 0.4).astype('float64')
+        # tmps = (tmps > 0.4).astype('float64')
 
         self.bsps = torch.from_numpy(bsps).to(device=torch.Tensor().device)[:data_size]
         self.tmps = torch.from_numpy(tmps).to(device=torch.Tensor().device)[:data_size]
@@ -111,7 +112,7 @@ class DynamicsDataset(Dataset):
         self.tmps = self.tmps.float()
 
     def __len__(self):
-        return len(self.bsps) * 5
+        return len(self.bsps)
 
     def __getitem__(self, idx):
         # Get a random starting position in the sequence for this sample
@@ -132,7 +133,7 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, version="normal", split='train', newload=True)
+    dataset = DynamicsDataset(5000, version="base", split='train', newload=True)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 

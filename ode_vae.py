@@ -1,9 +1,9 @@
 """
-@file ode_ssm_jump.py
+@file ode_vae.py
 @author Ryan Missel
 
-PyTorch Lightning implementation of the ODE-VAE-GRU where a GRU cell is used to correct the prediction
-of the dynamics network with an encoding of the current timestep.
+PyTorch Lightning implementation of the ODE-VAE that has a global neural ODE that operates
+on the VAE embedding in an encoder-decoder-like structure for time-series data
 
 Deterministic version in that the parameters W of the NODE are straight optimized.
 """
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from torchdiffeq import odeint
 from torch.utils.data import DataLoader
-from util.layers import Flatten, UnFlatten
+from util.layers import Flatten, UnFlatten, Gaussian
 from data.data_loader import DynamicsDataset
 from util.plotting import plot_recon_lightning
 from util.utils import get_act, get_exp_versions
@@ -49,7 +49,6 @@ class DeterministicODEFunction(nn.Module):
         # Build up initial distributions of weights and biases
         self.weights, self.biases = nn.ParameterList([]), nn.ParameterList([])
         for i, (n_in, n_out) in enumerate(zip(self.layers_dim[:-1], self.layers_dim[1:])):
-            # Weights
             self.weights.append(torch.nn.Parameter(torch.randn([n_in, n_out]), requires_grad=True))
             self.biases.append(torch.nn.Parameter(torch.randn([n_out]), requires_grad=True))
 
@@ -69,50 +68,48 @@ class DGSSM(pytorch_lightning.LightningModule):
         self.args = args
         self.last_train_idx = last_train_idx
 
-        # Losses
-        self.bce = nn.BCELoss(reduction='none')
-
         # ODE class holding weights and forward propagation
         self.ode_func = DeterministicODEFunction(args)
 
-        # Z encoder that takes a number of timeframes and outputs the latent representaiton of BSP
+        # Losses
+        self.bce = nn.MSELoss(reduction='none') #  , pos_weight=torch.tensor(2))
+
+        # Z0 encoder to initialize the vector field
         self.z_encoder = nn.Sequential(
             nn.Conv2d(self.args.z_amort, 64, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(64),
-            nn.ELU(),
+            nn.LeakyReLU(0.1),
 
             nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2),
             nn.BatchNorm2d(128),
-            nn.ELU(),
+            nn.LeakyReLU(0.1),
 
             Flatten(),
             nn.Linear(128 * 3 * 3, self.args.latent_dim)
         )
 
-        self.jump_cell = nn.GRUCell(input_size=self.args.latent_dim, hidden_size=self.args.latent_dim)
-
         # Decoding network to get the reconstructed trajectory
         self.decoder = nn.Sequential(
             # First perform two linear scaling layers
-            nn.Linear(self.args.latent_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ELU(),
+            nn.Linear(self.args.latent_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.1),
 
-            nn.Linear(512, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ELU(),
+            nn.Linear(256, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.1),
 
             # Then transform to image and tranpose convolve
             UnFlatten(8),
-            nn.ConvTranspose2d(32, 16, kernel_size=(5, 5), stride=3),
+            nn.ConvTranspose2d(16, 32, kernel_size=(5, 5), stride=3),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
+
+            nn.ConvTranspose2d(32, 16, kernel_size=(3, 3), stride=2, padding=(2, 2)),
             nn.BatchNorm2d(16),
-            nn.ELU(),
+            nn.LeakyReLU(0.1),
 
-            nn.ConvTranspose2d(16, 8, kernel_size=(3, 3), stride=2, padding=(2, 2)),
-            nn.BatchNorm2d(8),
-            nn.ELU(),
-
-            nn.ConvTranspose2d(8, 1, kernel_size=(4, 4), stride=2),
+            nn.ConvTranspose2d(16, 1, kernel_size=(4, 4), stride=2),
             nn.Sigmoid()
         )
 
@@ -126,40 +123,25 @@ class DGSSM(pytorch_lightning.LightningModule):
         """
         batch_size, generation_len = x.shape[0], x.shape[1]
 
-        # Get q(z0 | X) and sample z0
+        # Get z0
         z0 = self.z_encoder(x[:, :self.args.z_amort])
 
         # Evaluate model forward over T to get L latent reconstructions
-        timesteps = torch.linspace(1, generation_len - 1, generation_len - 1).to(self.device)
+        t = torch.linspace(0, generation_len - 1, generation_len).to(self.device)
 
         # Evaluate forward over timestep
-        last_z = z0
-        zt = [z0.unsqueeze(0)]
-        for t in timesteps[:-2]:
-            # Propagate forward the current dynamics prediction
-            z_pred = odeint(self.ode_func, last_z, t=torch.tensor([0, 1], dtype=torch.float),
-                            method='rk4', options={'step_size': 0.25})[-1, :]
+        zt = odeint(self.ode_func, z0, t, method='rk4', options={'step_size': 0.25})  # [T,q]
+        zt = zt.permute([1, 0, 2])
 
-            # Get the encoded state from the current data
-            z_enc = self.z_encoder(x[:, t.cpu().numpy():t.cpu().numpy() + 2])
-
-            # Update the prediction with the current state
-            z_corrected = self.jump_cell(z_enc, z_pred)
-
-            # Add to trajectory, update last z
-            last_z = z_corrected
-            zt.append(z_corrected.unsqueeze(0))
-
-        # Stack trajectory and decode
-        zt = torch.vstack(zt).permute([1, 0, 2])
+        # Decode
         Xrec = self.decoder(zt.contiguous().view([batch_size * generation_len, z0.shape[1]]))  # L*N*T,nc,d,d
         Xrec = Xrec.view([batch_size, generation_len, 100, 100])  # L,N,T,nc,d,d
         return Xrec
 
     def configure_optimizers(self):
         """ Define optimizers and schedulers used in training """
-        optim = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optim, milestones=[300, 600, 900], gamma=0.5)
+        optim = torch.optim.AdamW(self.parameters(), lr=self.args.learning_rate)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optim, milestones=[100, 250, 400], gamma=0.5)
         return [optim], [scheduler]
 
     def training_step(self, batch, batch_idx):
@@ -167,7 +149,7 @@ class DGSSM(pytorch_lightning.LightningModule):
         _, bsp, tmp = batch
         bsp = bsp[:, :self.args.generation_len]
 
-        # Get embedded C and z posterior with reconstructions
+        # Get prediction and sigmoid-activated predictions
         preds = self(bsp)
 
         # Get loss and update weights
@@ -188,15 +170,14 @@ class DGSSM(pytorch_lightning.LightningModule):
 
     def training_epoch_end(self, outputs):
         """ Every 10 epochs, get reconstructions on batch of data """
-        if self.current_epoch % 10 == 0:
+        if self.current_epoch % 25 == 0:
             # Make image dir in lightning experiment folder if it doesn't exist
             if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
                 os.mkdir('lightning_logs/version_{}/images/'.format(top))
-                shutil.copy("ode_ssm_jump.py", "lightning_logs/version_{}/".format(top))
+                shutil.copy("ode_vae.py", "lightning_logs/version_{}/".format(top))
 
             # Using the last batch of this
-            plot_recon_lightning(outputs[-1]["tmps"][:5], outputs[-1]["preds"][:5],
-                                 self.args.dim, self.args.train_len,
+            plot_recon_lightning(outputs[-1]["tmps"][:5], outputs[-1]["preds"][:5], self.args.dim, self.args.z_amort,
                                  'lightning_logs/version_{}/images/recon{}train.png'.format(top, self.current_epoch))
 
             # Copy experiment to relevant folder
@@ -206,10 +187,8 @@ class DGSSM(pytorch_lightning.LightningModule):
                 shutil.copytree("lightning_logs/version_{}/".format(top),
                             "experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop))
 
-        if self.current_epoch % 250 == 0:
-            torch.save(self.state_dict(), "experiments/{}/{}/version_{}/checkpoints/ckpt{}.ckpt".format(
-                self.args.model, self.args.exptype, exptop, self.current_epoch)
-            )
+        if self.current_epoch % 200 == 0:
+            torch.save(self.state_dict(), "lightning_logs/version_{}/checkpoints/save{}.ckpt".format(top, self.current_epoch))
 
     def validation_step(self, batch, batch_idx):
         """ One validation step for a given batch """
@@ -227,44 +206,46 @@ class DGSSM(pytorch_lightning.LightningModule):
             # Build the full loss
             loss = (self.args.r_beta * bce_r) + bce_g
 
-        # Logging
-        self.log("zval_bce_r_loss", self.args.r_beta * bce_r, prog_bar=True)
-        self.log("zval_bce_g_loss", bce_g, prog_bar=True)
+            # Logging
+            self.log("val_bce_r_loss", self.args.r_beta * bce_r, prog_bar=True)
+            self.log("val_bce_g_loss", bce_g, prog_bar=True)
+
         return {"val_loss": loss, "val_preds": preds.detach(), "val_tmps": tmp.detach()}
 
     def validation_epoch_end(self, outputs):
         """ Every 10 epochs, get reconstructions on batch of data """
-        if self.current_epoch % 10 == 0:
-            # Make image dir in lightning experiment folder if it doesn't exist
-            if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
-                os.mkdir('lightning_logs/version_{}/images/'.format(top))
+        # Make image dir in lightning experiment folder if it doesn't exist
+        if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
+            os.mkdir('lightning_logs/version_{}/images/'.format(top))
+            shutil.copy("ode_vae.py", "lightning_logs/version_{}/".format(top))
 
-            # Using the last batch of this
-            plot_recon_lightning(outputs[-1]["val_tmps"][:5], outputs[-1]["val_preds"][:5], self.args.dim,
-                                 self.args.train_len, 'lightning_logs/version_{}/images/recon{}val.png'.format(top, self.current_epoch))
+        # Using the last batch of this
+        ridx = np.random.randint(0, len(outputs), 1)[0]
+        plot_recon_lightning(outputs[ridx]["val_tmps"][:5], outputs[ridx]["val_preds"][:5],
+                             self.args.dim, self.args.z_amort,
+                             'lightning_logs/version_{}/images/recon{}val.png'.format(top, self.current_epoch))
 
-            # Save all val_reconstructions to npy file
-            recons = None
-            for tup in outputs:
-                if recons is None:
-                    recons = tup["val_preds"]
-                else:
-                    recons = torch.vstack((recons, tup["val_preds"]))
+        # Save all val_reconstructions to npy file
+        recons = None
+        for tup in outputs:
+            if recons is None:
+                recons = tup["val_preds"]
+            else:
+                recons = torch.vstack((recons, tup["val_preds"]))
 
-            np.save("lightning_logs/version_{}/recons.npy".format(top), recons.cpu().numpy())
+        np.save("lightning_logs/version_{}/recons.npy".format(top), recons.cpu().numpy())
 
     @staticmethod
     def add_model_specific_args(parent_parser):
         """ Model specific parameter group used for PytorchLightning integration """
         parser = parent_parser.add_argument_group("MoGSSM")
-        parser.add_argument('--latent_dim', type=int, default=16,
-                            help='latent dimension size, as well as vector field dimension')
+        parser.add_argument('--latent_dim', type=int, default=12, help='latent dimension vector field dimension')
 
         parser.add_argument('--num_layers', type=int, default=2, help='number of layers in the ODE func')
-        parser.add_argument('--num_hidden', type=int, default=100, help='number of nodes per hidden layer in ODE func')
+        parser.add_argument('--num_hidden', type=int, default=200, help='number of nodes per hidden layer in ODE func')
         parser.add_argument('--num_filt', type=int, default=16, help='number of filters in the CNNs')
 
-        parser.add_argument('--train_len', type=int, default=3, help='how many X samples to use in model initialization')
+        parser.add_argument('--train_len', type=int, default=24, help='how many samples to use in reconstruction')
         parser.add_argument('--z_amort', type=int, default=3, help='how many X samples to use in z0 inference')
         return parent_parser
 
@@ -274,18 +255,17 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Experiment ID
-    parser.add_argument('--exptype', type=str, default='vt_dynamics_random_bernoulli', help='name of the exp folder')
+    parser.add_argument('--exptype', type=str, default='normal_dynamics_mse', help='name of the exp folder')
     parser.add_argument('--checkpt', type=str, default='None', help='checkpoint to resume training from')
-    parser.add_argument('--model', type=str, default='jump', help='which model to choose')
+    parser.add_argument('--model', type=str, default='ode_vae', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
-    parser.add_argument('--version', type=str, default='normal', help='which dataset version to use')
+    parser.add_argument('--version', type=str, default='base', help='which dataset version to use')
 
     # Learning hyperparameters
-    parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs to run over')
+    parser.add_argument('--num_epochs', type=int, default=501, help='number of epochs to run over')
     parser.add_argument('--batch_size', type=int, default=16, help='size of batch')
-    parser.add_argument('--data_size', type=int, default=1008, help='size of batch')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='learning rate')
+    parser.add_argument('--learning_rate', type=float, default=0.0025, help='learning rate')
 
     # Dimensions of different components
     parser.add_argument('--dim', type=int, default=100, help='dimension of the image data')
@@ -302,7 +282,7 @@ if __name__ == '__main__':
     parser = DGSSM.add_model_specific_args(parser)
     arg = parser.parse_args()
     arg.gpus = [0]      # Choose the GPU ID to run on here
-    arg.generation_len = 13 if arg.random else 32
+    arg.generation_len = arg.train_len + arg.z_amort
 
     # Set a consistent seed over the full set for consistent analysis
     pytorch_lightning.seed_everything(125125125)
@@ -320,7 +300,9 @@ if __name__ == '__main__':
     valset = DataLoader(valdata, batch_size=arg.batch_size, shuffle=False, num_workers=4)
 
     # Init trainer
-    trainer = pytorch_lightning.Trainer.from_argparse_args(arg, max_epochs=arg.num_epochs, auto_select_gpus=True)
+    trainer = pytorch_lightning.Trainer.from_argparse_args(arg, max_epochs=arg.num_epochs,
+                                                           check_val_every_n_epoch=25,
+                                                           auto_select_gpus=True)
 
     # Initialize model
     model = DGSSM(arg, last_train_idx)

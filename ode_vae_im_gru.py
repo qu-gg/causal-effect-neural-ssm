@@ -243,8 +243,12 @@ class DGSSM(pytorch_lightning.LightningModule):
                                    method='rk4', options={'step_size': 0.25})[-1, :]
 
             # Split vector field into appropriate individual ones and update variables
-            last_z = combined_pred[:, :self.z_size]
+            z_pred = combined_pred[:, :self.z_size]
             a_pred = combined_pred[:, self.z_size:]
+
+            """ Step 3: Update z state via z_enc from GRU_z """
+            z_enc = self.z_step_encoder(y[:, int(t.cpu().numpy())].unsqueeze(1))
+            last_z = self.z_gru(z_enc, z_pred)
 
             # Append to variables
             zt.append(last_z.unsqueeze(0))
@@ -278,7 +282,7 @@ class DGSSM(pytorch_lightning.LightningModule):
         self.log("bce_g_loss", loss, prog_bar=True)
 
         if batch_idx >= self.last_train_idx:
-            return {"loss": loss, "preds": preds.detach(), "tmps": tmp.detach()}
+            return {"loss": loss, "preds": sig_preds.detach(), "tmps": tmp.detach()}
         else:
             return {"loss": loss}
 
@@ -288,7 +292,7 @@ class DGSSM(pytorch_lightning.LightningModule):
             # Make image dir in lightning experiment folder if it doesn't exist
             if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
                 os.mkdir('lightning_logs/version_{}/images/'.format(top))
-                shutil.copy("ode_vae_im.py", "lightning_logs/version_{}/".format(top))
+                shutil.copy("ode_vae_im_gru.py", "lightning_logs/version_{}/".format(top))
 
             # Using the last batch of this
             plot_recon_lightning(outputs[-1]["tmps"][:5], outputs[-1]["preds"][:5], self.args.dim, self.args.z_amort,
@@ -327,7 +331,7 @@ class DGSSM(pytorch_lightning.LightningModule):
         # Make image dir in lightning experiment folder if it doesn't exist
         if not os.path.exists('lightning_logs/version_{}/images/'.format(top)):
             os.mkdir('lightning_logs/version_{}/images/'.format(top))
-            shutil.copy("ode_vae_im.py", "lightning_logs/version_{}/".format(top))
+            shutil.copy("ode_vae_im_gru.py", "lightning_logs/version_{}/".format(top))
 
         # Using the last batch of this
         ridx = np.random.randint(0, len(outputs), 1)[0]
@@ -354,6 +358,7 @@ class DGSSM(pytorch_lightning.LightningModule):
 
         parser.add_argument('--num_layers', type=int, default=2, help='number of layers in the ODE func')
         parser.add_argument('--num_hidden', type=int, default=200, help='number of nodes per hidden layer in ODE func')
+        parser.add_argument('--intervention_hidden', type=int, default=50, help='number of nodes per hidden layer in ODE func')
         parser.add_argument('--num_filt', type=int, default=16, help='number of filters in the CNNs')
 
         parser.add_argument('--train_len', type=int, default=24, help='how many samples to use in reconstruction')
@@ -369,7 +374,7 @@ def parse_args():
     parser.add_argument('--exptype', type=str, default='pacing_dynamics_mse', help='name of the exp folder')
     parser.add_argument('--checkpt', type=str, default='None', help='checkpoint to resume training from')
     parser.add_argument('--prev_ckpt', type=str, default='None', help='original ode-vae ckpt to load from')
-    parser.add_argument('--model', type=str, default='ode_vae_im', help='which model to choose')
+    parser.add_argument('--model', type=str, default='ode_vae_im_gru', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
     parser.add_argument('--version', type=str, default='pacing', help='which dataset version to use')

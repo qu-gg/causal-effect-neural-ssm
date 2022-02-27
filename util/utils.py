@@ -17,7 +17,7 @@ def get_act(act="relu"):
     if act == "relu":
         return nn.ReLU()
     elif act == "leaky_relu":
-        return nn.LeakyReLU()
+        return nn.LeakyReLU(0.1)
     elif act == "sigmoid":
         return nn.Sigmoid()
     elif act == "tanh":
