@@ -184,6 +184,70 @@ class DGSSM(pytorch_lightning.LightningModule):
             nn.Sigmoid()
         )
 
+
+class ODEVAEIM(pytorch_lightning.LightningModule):
+    def __init__(self, args, last_train_idx, new_train=True):
+        super().__init__()
+        self.save_hyperparameters(args)
+
+        # Args
+        self.args = args
+        self.H = None
+        self.last_train_idx = last_train_idx
+
+        # Sizes of vector fields
+        self.z_size = args.latent_dim
+        self.a_size = args.intervention_dim
+
+        # Losses
+        self.mse = nn.MSELoss(reduction='none')
+
+        # Dynamics functions
+        self.normal_net = DGSSM(args)
+
+        if new_train:
+            self.normal_net.load_state_dict(
+                torch.load(
+                    "lightning_logs/version_{}/checkpoints/{}".format(arg.prev_ckpt, "epoch=349-step=13299.ckpt")
+                )["state_dict"]
+            )
+
+        self.normal_net.ode_func.requires_grad_(False)
+        self.normal_net.z_encoder.requires_grad_(False)
+        self.normal_net.decoder.requires_grad_(True)
+
+        self.combined_func = CombinedODEFunction(args, self.normal_net.ode_func)
+
+        """ Z update mechanisms """
+        self.z_step_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
+
+            nn.Conv2d(32, 64, kernel_size=(3, 3), stride=2),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1),
+
+            Flatten(),
+            nn.Linear(64 * 3 * 3, self.args.latent_dim)
+        )
+
+        self.z_gru = nn.GRUCell(input_size=self.args.latent_dim, hidden_size=self.args.latent_dim)
+
+        """ a update mechanisms for the a dynamics """
+        self.a_jump_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), stride=2, padding=(2, 2)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
+
+            nn.Conv2d(32, 64, kernel_size=(3, 3), stride=2),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1),
+
+            Flatten(),
+            nn.Linear(64 * 3 * 3, self.args.latent_dim)
+        )
+
         self.a_gru = nn.GRUCell(input_size=self.args.intervention_dim, hidden_size=self.args.intervention_dim)
 
     def set_H(self, H):
@@ -224,7 +288,7 @@ class DGSSM(pytorch_lightning.LightningModule):
             """ Step 1: Get jumped intervention a """
             # Get normal dynamics prediction
             z_pred = odeint(self.normal_net.ode_func, last_z, t=torch.tensor([0, 1], dtype=torch.float),
-                            method='rk4', options={'step_size': 0.25})[-1, :self.z_size]
+                            method='rk4', options={'step_size': 0.25})[-1, :]
 
             # Decode to get normal x prediction
             x_pred = self.normal_net.decoder(z_pred.contiguous().view([batch_size, z0.shape[1]]))  # N, D
@@ -276,13 +340,13 @@ class DGSSM(pytorch_lightning.LightningModule):
         preds = self(bsp)
 
         # Get loss and update weights
-        loss = self.bce(preds, tmp).sum([2, 3]).view([-1]).mean()
+        loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
 
         # Logging
         self.log("bce_g_loss", loss, prog_bar=True)
 
         if batch_idx >= self.last_train_idx:
-            return {"loss": loss, "preds": sig_preds.detach(), "tmps": tmp.detach()}
+            return {"loss": loss, "preds": preds.detach(), "tmps": tmp.detach()}
         else:
             return {"loss": loss}
 
@@ -319,7 +383,7 @@ class DGSSM(pytorch_lightning.LightningModule):
             preds = self(bsp)
 
             # Get loss and update weights
-            loss = self.bce(preds, tmp).sum([2, 3]).view([-1]).mean()
+            loss = self.mse(preds, tmp).sum([2, 3]).view([-1]).mean()
 
             # Logging
             self.log("val_bce_g_loss", loss, prog_bar=True)
@@ -373,7 +437,7 @@ def parse_args():
     # Experiment ID
     parser.add_argument('--exptype', type=str, default='pacing_dynamics_mse', help='name of the exp folder')
     parser.add_argument('--checkpt', type=str, default='None', help='checkpoint to resume training from')
-    parser.add_argument('--prev_ckpt', type=str, default='None', help='original ode-vae ckpt to load from')
+    parser.add_argument('--prev_ckpt', type=str, default='1', help='original ode-vae ckpt to load from')
     parser.add_argument('--model', type=str, default='ode_vae_im_gru', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')

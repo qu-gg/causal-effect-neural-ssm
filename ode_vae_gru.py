@@ -194,7 +194,7 @@ class DGSSM(pytorch_lightning.LightningModule):
                 shutil.copy("ode_vae_gru.py", "lightning_logs/version_{}/".format(top))
 
             # Using the last batch of this
-            plot_recon_lightning(outputs[-1]["tmps"][:5], outputs[-1]["preds"][:5], self.args.dim, self.args.z_amort,
+            plot_recon_lightning(outputs[-1]["tmps"][:5, :-2], outputs[-1]["preds"][:5], self.args.dim, self.args.z_amort,
                                  'lightning_logs/version_{}/images/recon{}train.png'.format(top, self.current_epoch))
 
             # Copy experiment to relevant folder
@@ -204,7 +204,7 @@ class DGSSM(pytorch_lightning.LightningModule):
                 shutil.copytree("lightning_logs/version_{}/".format(top),
                             "experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop))
 
-        if self.current_epoch % 200 == 0:
+        if self.current_epoch % 100 == 0:
             torch.save(self.state_dict(), "lightning_logs/version_{}/checkpoints/save{}.ckpt".format(top, self.current_epoch))
 
     def validation_step(self, batch, batch_idx):

@@ -101,6 +101,9 @@ class DynamicsDataset(Dataset):
         else:
             bsps = np.load("data/{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
             tmps = np.load("data/{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
+            # bsps = np.load("{}/{}_bsps_{}.npy".format(prefix, version, split), allow_pickle=True)
+            # tmps = np.load("{}/{}_tmps_{}.npy".format(prefix, version, split), allow_pickle=True)
+
 
         # Transform into tensors and change to float type
         # tmps = (tmps > 0.4).astype('float64')
@@ -133,7 +136,7 @@ class DynamicsDataset(Dataset):
 
 
 if __name__ == '__main__':
-    dataset = DynamicsDataset(5000, version="base", split='train', newload=True)
+    dataset = DynamicsDataset(5000, version="block", split='train', newload=False)
     print(dataset.bsps.shape)
     print(dataset.tmps.shape)
 

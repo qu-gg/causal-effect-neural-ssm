@@ -12,17 +12,20 @@ class Gaussian(nn.Module):
     def __init__(self, in_dim, z_dim):
         super(Gaussian, self).__init__()
 
-        self.mu = nn.Sequential(
-            nn.Linear(in_dim, in_dim // 2),
-            nn.LeakyReLU(0.1),
-            nn.Linear(in_dim // 2, z_dim)
-        )
+        # self.mu = nn.Sequential(
+        #     nn.Linear(in_dim, in_dim // 2),
+        #     nn.LeakyReLU(0.1),
+        #     nn.Linear(in_dim // 2, z_dim)
+        # )
+        #
+        # self.var = nn.Sequential(
+        #     nn.Linear(in_dim, in_dim // 2),
+        #     nn.LeakyReLU(0.1),
+        #     nn.Linear(in_dim // 2, z_dim)
+        # )
 
-        self.var = nn.Sequential(
-            nn.Linear(in_dim, in_dim // 2),
-            nn.LeakyReLU(0.1),
-            nn.Linear(in_dim // 2, z_dim)
-        )
+        self.mu = nn.Linear(in_dim, z_dim)
+        self.var = nn.Linear(in_dim, z_dim)
 
     def reparameterize(self, mu, logvar):
         # std = torch.sqrt(var + 1e-10)

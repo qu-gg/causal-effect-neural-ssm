@@ -187,7 +187,7 @@ class DGSSM(pytorch_lightning.LightningModule):
                 shutil.copytree("lightning_logs/version_{}/".format(top),
                             "experiments/{}/{}/version_{}".format(self.args.model, self.args.exptype, exptop))
 
-        if self.current_epoch % 200 == 0:
+        if self.current_epoch % 100 == 0:
             torch.save(self.state_dict(), "lightning_logs/version_{}/checkpoints/save{}.ckpt".format(top, self.current_epoch))
 
     def validation_step(self, batch, batch_idx):
@@ -260,7 +260,7 @@ def parse_args():
     parser.add_argument('--model', type=str, default='ode_vae', help='which model to choose')
 
     parser.add_argument('--random', type=bool, default=True, help='whether to have randomized sequence starts')
-    parser.add_argument('--version', type=str, default='base', help='which dataset version to use')
+    parser.add_argument('--version', type=str, default='normal', help='which dataset version to use')
 
     # Learning hyperparameters
     parser.add_argument('--num_epochs', type=int, default=501, help='number of epochs to run over')
