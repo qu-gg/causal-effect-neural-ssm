@@ -11,11 +11,12 @@ Despite substantial progress in deep learning approaches to time-series reconstr
 ### Citation
 If you use portions of this repository or have found use for the model in your research directions, please consider citing:
 ```
-@inproceedings{toloubidokhti2022latentcausalssm,
-  title={Neural State-Space Modeling with Latent Causal-Effect Disentanglement},
-  author={Toloubidokhti, Maryam and Missel, Ryan and Jiang, Xiajun and Otani, Niels and Wang, Linwei},
-  booktitle={International Workshop on Machine Learning in Medical Imaging},
-  year={2022},
+@misc{toloubidokhti2022neural,
+      title={Neural State-Space Modeling with Latent Causal-Effect Disentanglement}, 
+      author={Maryam Toloubidokhti and Ryan Missel and Xiajun Jiang and Niels Otani and Linwei Wang},
+      year={2022},
+      eprint={2209.12387},
+      archivePrefix={arXiv}
 }
 ```
 
