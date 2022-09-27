@@ -1,5 +1,5 @@
 <h1 align='center'>Neural State-Space Modeling with <br>Latent Causal-Effect Disentanglement<br>
-   [<a href='https://sites.google.com/view/mlmi2022/'>MICCAI-MLMI</a>, <a href='https://arxiv.org/'>arXiv</a>]</h2>
+   [<a href='https://sites.google.com/view/mlmi2022/'>MICCAI-MLMI</a>, <a href='https://arxiv.org/abs/2209.12387'>arXiv</a>]</h2>
 <p>This repository holds the experiments and models as explored in the work, "Neural State-Space Modeling with
 Latent Causal-Effect Disentanglement," for the 13th Machine Learning in Medical Imaging (MLMI 2022) Workshop.</p>
 
